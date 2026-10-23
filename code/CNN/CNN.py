@@ -7,15 +7,18 @@ import torch.nn as nn
 # ----------------------------------------------------------------------
 # CONFIGURAZIONE
 # ----------------------------------------------------------------------
+giunto = 1
 SEED = 0
 INPUT_A_CSV = "../Datasets/trainingA.csv"
 INPUT_B_CSV = "../Datasets/trainingB.csv"
+INPUT_COLS = [f"velocity_rad_{giunto}_s", f"tau_load_{giunto}"]   # ordine dei canali
+IN_CHANNELS = len(INPUT_COLS)
 
-CHANNELS = 16
+CHANNELS = 24
 KERNEL_SIZE = 9
 DILATIONS = (1, 6, 36, 216)
 
-WINDOW = 2048          # campioni di output per finestra
+WINDOW = 1024          # campioni di output per finestra
 BATCH_SIZE = 16
 EPOCHS = 300
 LR = 1e-3
@@ -33,9 +36,9 @@ print(f"Using {device} device")
 # MODELLO: convoluzioni dilatate causali, senza padding interno
 # ----------------------------------------------------------------------
 class TCN(nn.Module):
-    def __init__(self, channels, kernel_size, dilations):
+    def __init__(self, in_channels, channels, kernel_size, dilations):
         super().__init__()
-        layers, c = [], 1
+        layers, c = [], in_channels
         for d in dilations:
             layers += [nn.Conv1d(c, channels, kernel_size, dilation=d), nn.ReLU()]
             c = channels
@@ -43,12 +46,12 @@ class TCN(nn.Module):
         self.final = nn.Conv1d(channels, 1, kernel_size=1)
         self.receptive_field = 1 + sum(d * (kernel_size - 1) for d in dilations)
 
-    def forward(self, x):                 # x: [B, 1, L + RF - 1] -> [B, 1, L]
+    def forward(self, x):                 # x: [B, C, L + RF - 1] -> [B, 1, L]
         return self.final(self.body(x))
 
-model = TCN(CHANNELS, KERNEL_SIZE, DILATIONS).to(device)
+model = TCN(IN_CHANNELS, CHANNELS, KERNEL_SIZE, DILATIONS).to(device)
 RF = model.receptive_field
-PAD = RF - 1 #calcolo del pad in maniera congruente al campo recettivo
+PAD = RF - 1   # padding congruente con il campo recettivo
 print(model, f"\nCampo recettivo: {RF} campioni")
 
 # ----------------------------------------------------------------------
@@ -58,11 +61,11 @@ def load(csv):
     df = pandas.read_csv(csv)
     xs, ys = [], []
     for _, g in df.groupby("traj_id", sort=True):
-        xs.append(g["velocity_rad_s"].to_numpy(np.float32))
-        ys.append(g["torque_friction_estimated_Nm"].to_numpy(np.float32))
+        xs.append(g[INPUT_COLS].to_numpy(np.float32).T)             # [C, T]
+        ys.append(g[f"tau_friction_estimated_{giunto}"].to_numpy(np.float32))
     return xs, ys
 
-#per splite delle traiettorie in training e validazione
+# split delle traiettorie in training e validazione
 def split(xs, ys):
     idx = list(range(len(xs)))
     random.shuffle(idx)
@@ -80,46 +83,54 @@ x_tr, y_tr = xtrA + xtrB, ytrA + ytrB
 x_va, y_va = xvaA + xvaB, yvaA + yvaB
 print(f"Train: {len(x_tr)} traiettorie, validazione: {len(x_va)}")
 
-# calcolo della deviazione standard
-x_scale = float(np.concatenate(x_tr).std())
+# statistiche PER CANALE, solo sul training: forma [C, 1]
+x_cat = np.concatenate(x_tr, axis=1)
+x_mean = x_cat.mean(axis=1, keepdims=True).astype(np.float32)
+x_std = x_cat.std(axis=1, keepdims=True).astype(np.float32)
+x_std = np.where(x_std > 1e-8, x_std, 1.0).astype(np.float32)
+
 y_scale = float(np.concatenate(y_tr).std())
+y_scale = y_scale if y_scale > 1e-8 else 1.0
 
 def prepad(x):
-    #padding dei campioni iniziali per garantire sufficiente spostamento in relazione al padding
-    return np.concatenate([np.zeros(PAD, np.float32), x / x_scale])
+    xn = ((x - x_mean) / x_std).astype(np.float32)                  # [C, T]
+    pad = np.repeat(xn[:, :1], PAD, axis=1)                         # [C, PAD]
+    return np.concatenate([pad, xn], axis=1)                        # [C, PAD + T]
 
 xp_tr = [prepad(x) for x in x_tr]
 yn_tr = [y / y_scale for y in y_tr]
-assert all(len(x) >= WINDOW for x in x_tr), "traiettoria piu' corta della finestra"
+assert all(x.shape[1] >= WINDOW for x in x_tr), "traiettoria piu' corta della finestra"
 
 def epoch_batches():
     windows = []
     for k, x in enumerate(x_tr):
-        for _ in range(max(1, len(x) // WINDOW)):   # numero di finestre ~ durata
-            windows.append((k, random.randint(0, len(x) - WINDOW)))
+        T = x.shape[1]
+        for _ in range(max(1, T // WINDOW)):      # numero di finestre
+            windows.append((k, random.randint(0, T - WINDOW)))
     random.shuffle(windows)
     for i in range(0, len(windows), BATCH_SIZE):
         b = windows[i:i + BATCH_SIZE]
-        xb = np.stack([xp_tr[k][s:s + WINDOW + PAD] for k, s in b])
-        yb = np.stack([yn_tr[k][s:s + WINDOW] for k, s in b])
-        yield (torch.from_numpy(xb).unsqueeze(1).to(device),
+        xb = np.stack([xp_tr[k][:, s:s + WINDOW + PAD] for k, s in b])   # [B, C, L]
+        yb = np.stack([yn_tr[k][s:s + WINDOW] for k, s in b])            # [B, WINDOW]
+        yield (torch.from_numpy(xb).to(device),
                torch.from_numpy(yb).unsqueeze(1).to(device))
 
 @torch.no_grad()
-def predict(x):
-
+def predict(x):                               # x: [C, T] grezzo -> [T] in Nm
     model.eval()
-    xt = torch.from_numpy(prepad(x)).view(1, 1, -1).to(device)
+    xt = torch.from_numpy(prepad(x)).unsqueeze(0).to(device)         # [1, C, PAD + T]
     return model(xt).view(-1).cpu().numpy() * y_scale
 
-def val_rmse(): #calcolo dell RMSE
+def val_rmse():
     se, n = 0.0, 0
     for x, y in zip(x_va, y_va):
         e = predict(x) - y
         se += float((e ** 2).sum()); n += len(y)
     return (se / n) ** 0.5
 
-
+# ----------------------------------------------------------------------
+# TRAINING
+# ----------------------------------------------------------------------
 optimizer = torch.optim.Adam(model.parameters(), lr=LR)
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=15)
 criterion = nn.MSELoss()
@@ -147,19 +158,24 @@ for epoch in range(EPOCHS):
     if (epoch + 1) % 10 == 0:
         print(f"Epoca [{epoch+1}/{EPOCHS}] train MSE (norm): {tot/nb:.5f} | "
               f"val RMSE: {v:.4f} Nm | best: {best:.4f} | lr: {optimizer.param_groups[0]['lr']:.2e}")
-    if bad >= ES_PATIENCE: #per early stopping
+    if bad >= ES_PATIENCE:
         print(f"Early stopping all'epoca {epoch+1}")
         break
 
 model.load_state_dict(best_state)
 torch.save({
     "model_state_dict": model.state_dict(),
+    "in_channels": IN_CHANNELS,
+    "input_cols": INPUT_COLS,
     "channels": CHANNELS,
     "kernel_size": KERNEL_SIZE,
     "dilations": DILATIONS,
     "receptive_field": RF,
-    "x_scale": x_scale,
+    "x_mean": x_mean.squeeze(1).tolist(),
+    "x_std": x_std.squeeze(1).tolist(),
     "y_scale": y_scale,
     "best_val_rmse_Nm": best,
     "seed": SEED,
-}, "tcn_checkpoint.pth")
+    "giunto": giunto
+}, f"tcn_checkpoint_{giunto}.pth")
+print(f"Modello salvato in: tcn_checkpoint_{giunto}.pth")

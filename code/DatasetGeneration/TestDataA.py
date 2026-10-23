@@ -5,188 +5,245 @@ import mujoco
 # ----------------------------------------------------------------------
 # CONFIGURAZIONE
 # ----------------------------------------------------------------------
-
-MODEL_PATH = "../kuka_iiwa_14/scene.xml"  
-TARGET_JOINT_NAME = "joint2"        
-EXAMPLE_JOINT_NAME = "joint3"
-SIM_DT = 0.001                      
-LOG_DECIMATION = 1                  
-TORQUE_LIMIT = 320.0
-DURATION_PER_STEP = 0.7          # secondi per ogni livello di velocità
-RAMP_TIME = 0.3                     # tempo per passaggio da una velocità all'altra
-
-KP_VEL = 150
-KI_VEL = 18
-
-NUM_VELOCITIES = 10
-
-FC = 8.0        # Costante attrito di coulomb
-FS = 12.0       # Costante attrito statico
-FV = 0.8        # Costante attrito viscoso
-VS = 0.1        # velocità di stribeck
-
-SIGMA_0 = 500   # Nm/rad
-SIGMA_1 = 7    # Nm·s/rad 
-
-NUM_TRAJ = 15
+SEED = 1
+rng = np.random.default_rng(SEED)
+MODEL_PATH = "../kuka_iiwa_14/scene.xml"
 OUTPUT_CSV = "../Datasets/testA.csv"
+SIM_DT = 0.001
+N_JOINTS = 7
 
+TORQUE_LIMIT = np.array([320.0, 320.0, 180.0, 180.0, 110.0, 40.0, 40.0])
+SCALE = TORQUE_LIMIT / 320         # fattore di scala per giunto
+
+# Controllo di velocita' (PI), scalato per giunto
+KP_VEL = 150.0 * SCALE
+KI_VEL = 18.0 * SCALE
+
+# Attrito LuGre: valori a carico nullo, per giunto
+FC0 = 0.025 * TORQUE_LIMIT
+FS0 = 1.5 * FC0
+FV0 = 0.8 * SCALE
+SIGMA_0_0 = 1e4 * SCALE               # Nm/rad
+SIGMA_1_0 = 100.0 * SCALE             # Nm*s/rad
+VS = 0.1                              # rad/s
+
+# Dipendenza dal carico
+TAU_REF = 50.0 * SCALE                # Nm, scala del carico PER GIUNTO
+K_LOAD_C = 0.5
+K_LOAD_S = 0.5
+K_LOAD_SIGMA0 = 0.3
+LOAD_MAX = 3.0
+LOAD_FILTER_ALPHA = 0.02
+
+# Profili di velocita'
+NUM_TRAJ = 18                         # traiettorie da ACCETTARE
+MAX_ATTEMPTS = 3 * NUM_TRAJ           # tentativi massimi (alcune vengono scartate per i vincoli)
+SEGMENTS_PER_TRAJ = 5
+OMEGA_MIN, OMEGA_MAX = 1.0, 4.0
+AMPLITUDE_MAX = 1.0                  # rad/s
+MAX_ACCEL = 10.0                      # rad/s^2
+RAMP_TIME = 0.1                       # s, raccordo morbido tra un segmento e il successivo
+SEGMENT_DURATION = 1.5 * (2 * np.pi / OMEGA_MIN)   # copre il periodo del seno piu' lento
+JOINT_MARGIN = 0.15                   # rad di margine dai limiti di giunto
+CONSTRAINT_TOL = 1e-9
+
+# ----------------------------------------------------------------------
+# MODELLO E ATTUATORI (controllo in coppia invece che in posizione)
+# ----------------------------------------------------------------------
 model = mujoco.MjModel.from_xml_path(MODEL_PATH)
 data = mujoco.MjData(model)
 model.opt.timestep = SIM_DT
 
-target_joint_id    = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, TARGET_JOINT_NAME)
-target_qpos_adr    = model.jnt_qposadr[target_joint_id]
-target_qvel_adr    = model.jnt_dofadr[target_joint_id]
-target_actuator_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, "actuator2")
-q_home = [0.0] * 7
+joint_ids = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, f"joint{i}") for i in range(1, N_JOINTS + 1)]
+actuator_ids = np.array([mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, f"actuator{i}")
+                         for i in range(1, N_JOINTS + 1)])
 
-# configurazione attuatore: una volta sola, e' su model non su data
-model.actuator_gaintype[target_actuator_id] = mujoco.mjtGain.mjGAIN_FIXED
-model.actuator_gainprm[target_actuator_id, 0] = 1.0
-model.actuator_biastype[target_actuator_id] = mujoco.mjtBias.mjBIAS_NONE
-model.actuator_biasprm[target_actuator_id, :] = 0.0
-model.actuator_ctrllimited[target_actuator_id] = 1
-model.actuator_ctrlrange[target_actuator_id] = [-TORQUE_LIMIT, TORQUE_LIMIT]
+qpos_adr = np.array([model.jnt_qposadr[j] for j in joint_ids])
+qvel_adr = np.array([model.jnt_dofadr[j] for j in joint_ids])
 
-lista_df = []
+JOINT_LO = np.array([model.jnt_range[j][0] if model.jnt_limited[j] else -np.inf for j in joint_ids])
+JOINT_HI = np.array([model.jnt_range[j][1] if model.jnt_limited[j] else np.inf for j in joint_ids])
 
-# ----------------------------------------------------------------------
-# GENERAZIONE DEL PROFILO DI VELOCITA' DESIDERATA NEL TEMPO
-# ----------------------------------------------------------------------
+for k, act in enumerate(actuator_ids):
+    model.actuator_gaintype[act] = mujoco.mjtGain.mjGAIN_FIXED
+    model.actuator_gainprm[act, 0] = 1.0
+    model.actuator_biastype[act] = mujoco.mjtBias.mjBIAS_NONE
+    model.actuator_biasprm[act, :] = 0.0
+    model.actuator_ctrllimited[act] = 1
+    model.actuator_ctrlrange[act] = [-TORQUE_LIMIT[k], TORQUE_LIMIT[k]]
 
+q_home = np.zeros(model.nv)
+
+ARMATURE = np.array([0.5, 0.5, 0.3, 0.3, 0.2, 0.1, 0.1])   # kg m^2, da tarare
+model.dof_armature[qvel_adr] = ARMATURE
+mujoco.mj_setConst(model, data)
 def reset_traj():
     mujoco.mj_resetData(model, data)
     data.qpos[:] = q_home
-    for act_id in range(model.nu):
-        if act_id != target_actuator_id:
-            jid = model.actuator_trnid[act_id, 0]
-            data.ctrl[act_id] = q_home[model.jnt_qposadr[jid]]
     mujoco.mj_forward(model, data)
 
-def desired_velocity(t):
-    """Restituisce la velocita' desiderata del giunto target al tempo t,
-    con rampe lineari tra un livello costante e il successivo."""
-    step_duration = DURATION_PER_STEP
-    idx = int(t // step_duration)
-    idx = min(idx, len(VELOCITY_LEVELS) - 1)
-    t_in_step = t % step_duration
+# ----------------------------------------------------------------------
+# CONTROLLO DI STABILITA' NUMERICA DELL'ATTRITO 
+# ----------------------------------------------------------------------
+reset_traj()
+M = np.zeros((model.nv, model.nv))
+mujoco.mj_fullM(model,data, M)
+J_eff = np.diag(M)[qvel_adr]
+print("Giunto | J_eff [kg m^2] | w*dt | sigma1*dt/J   ( < 0.5; instabile oltre ~2)")
+for k in range(N_JOINTS):
+    w_dt = SIM_DT * np.sqrt(SIGMA_0_0[k] / J_eff[k])
+    s1_dt = SIM_DT * SIGMA_1_0[k] / J_eff[k]
+    flag = "  <-- ATTENZIONE" if max(w_dt, s1_dt) > 0.5 else ""
+    print(f"  {k+1}    | {J_eff[k]:10.4f}     | {w_dt:.3f} | {s1_dt:.3f}{flag}")
 
-    v_target = VELOCITY_LEVELS[idx]
-    v_prev = VELOCITY_LEVELS[idx - 1] if idx > 0 else 0.0
+# ----------------------------------------------------------------------
+# PROFILO DI VELOCITA' DESIDERATA
+# ----------------------------------------------------------------------
+def smootherstep(x):
+    x = np.clip(x, 0.0, 1.0)
+    return x**3 * (x * (x * 6 - 15) + 10)
 
-    if t_in_step < RAMP_TIME:
-        alpha = t_in_step / RAMP_TIME
-        return v_prev + alpha * (v_target - v_prev)
-    return v_target
+def desired_velocity(t, amplitudes, omegas):
+    """amplitudes, omegas: [N_JOINTS, SEGMENTS]. Restituisce [N_JOINTS]."""
+    idx = min(int(t // SEGMENT_DURATION), amplitudes.shape[1] - 1)
+    t_in_step = t % SEGMENT_DURATION
 
+    v_curr = amplitudes[:, idx] * np.sin(omegas[:, idx] * t_in_step)
+    if idx > 0 and t_in_step < RAMP_TIME:
+        v_prev = amplitudes[:, idx - 1] * np.sin(omegas[:, idx - 1] * SEGMENT_DURATION)
+        alpha = smootherstep(t_in_step / RAMP_TIME)
+        return (1 - alpha) * v_prev + alpha * v_curr
+    return v_curr
 
-for i in range(NUM_TRAJ):
+def limit_near_joint_range(v_des, qpos):
+    """Rallena il comando vicino ai limiti di giunto per non attivare i vincoli."""
+    q = qpos[qpos_adr]
+    v = v_des.copy()
+    near_hi = (v > 0) & (q > JOINT_HI - JOINT_MARGIN)
+    near_lo = (v < 0) & (q < JOINT_LO + JOINT_MARGIN)
+    v[near_hi] *= np.clip((JOINT_HI[near_hi] - q[near_hi]) / JOINT_MARGIN, 0.0, 1.0)
+    v[near_lo] *= np.clip((q[near_lo] - JOINT_LO[near_lo]) / JOINT_MARGIN, 0.0, 1.0)
+    return v
 
+# ----------------------------------------------------------------------
+# COLONNE DEL LOG
+# ----------------------------------------------------------------------
+cols = (["t"]
+        + [f"position_{j}_rad" for j in range(N_JOINTS)]
+        + [f"velocity_rad_{j}_s" for j in range(N_JOINTS)]
+        + [f"tau_load_{j}" for j in range(N_JOINTS)]
+        + [f"tau_friction_estimated_{j}" for j in range(N_JOINTS)]
+        + [f"torque_friction_true_{j}" for j in range(N_JOINTS)]
+        + [f"constraint_{j}" for j in range(N_JOINTS)])
+constraint_cols = [f"constraint_{j}" for j in range(N_JOINTS)]
+
+# ----------------------------------------------------------------------
+# LOOP SULLE TRAIETTORIE
+# ----------------------------------------------------------------------
+n_steps = int(SEGMENT_DURATION * SEGMENTS_PER_TRAJ / SIM_DT)
+tau_inertia = np.zeros(model.nv)      # buffer riusato
+
+accepted, attempts, discarded = 0, 0, 0
+
+while accepted < NUM_TRAJ and attempts < MAX_ATTEMPTS:
+    attempts += 1
+
+    # --- parametri casuali della traiettoria: un profilo per ogni giunto ---
+    OMEGAS = rng.uniform(OMEGA_MIN, OMEGA_MAX, size=(N_JOINTS, SEGMENTS_PER_TRAJ))
+    max_amp = np.minimum(AMPLITUDE_MAX, MAX_ACCEL / OMEGAS)           # rispetta l'accelerazione massima
+    AMPLITUDES = rng.uniform(-1, 1, size=(N_JOINTS, SEGMENTS_PER_TRAJ)) * max_amp
+
+    n_slow = max(1, SEGMENTS_PER_TRAJ // 2)                           # segmenti lenti (zona di Stribeck)
+    for j in range(N_JOINTS):
+        slow = rng.choice(SEGMENTS_PER_TRAJ, size=n_slow, replace=False)
+        AMPLITUDES[j, slow] = rng.uniform(-0.1, 0.1, size=n_slow)
+
+    # --- stato iniziale ---
     reset_traj()
-    integral_error = 0.0
-    z = 0.0
-
-    n_slows = int(max(1, NUM_VELOCITIES * 0.70))
-    VELOCITY_LEVELS = np.random.uniform(-1.8, 1.8, size=10)
-    VELOCITY_LEVELS[: n_slows] = np.random.uniform(-0.3, 0.3, size = n_slows)
-
-    
-    total_time = DURATION_PER_STEP * len(VELOCITY_LEVELS)
-    n_steps = int(total_time / SIM_DT)
-    n_dof = model.nv
-
-
-    # ----------------------------------------------------------------------
-    # LOOP DI SIMULAZIONE
-    # ----------------------------------------------------------------------
-
-    log_rows = []
-    integral_error = 0.0
-    z = 0.0
-    tau_inertia = np.zeros(model.nv)   # buffer riusato, allocato una volta sola
+    integral_error = np.zeros(N_JOINTS)
+    z = np.zeros(N_JOINTS)
+    tau_load_filt = np.zeros(N_JOINTS)
+    log = np.empty((n_steps, len(cols)))
 
     for step in range(n_steps):
-
         t = step * SIM_DT
 
-        # ------------------------------------------------------------------
-        # 1. CONTROLLO: calcolo della coppia di comando
-        # ------------------------------------------------------------------
-        v_des = desired_velocity(t)
-        v_meas = data.qvel[target_qvel_adr]
+        # 1. CONTROLLO PI DI VELOCITA' (vettoriale, un valore per giunto)
+        v_des = limit_near_joint_range(desired_velocity(t, AMPLITUDES, OMEGAS), data.qpos)
+        v_meas = data.qvel[qvel_adr].copy()
         err = v_des - v_meas
 
-        tau_pi = KP_VEL * err + KI_VEL * integral_error
-        tau_cmd = tau_pi + data.qfrc_bias[target_qvel_adr]   # feedforward gravita'+Coriolis
+        tau_cmd = KP_VEL * err + KI_VEL * integral_error + data.qfrc_bias[qvel_adr]
 
-        # anti wind-up: integro solo se non sono in saturazione,
-        # oppure se l'errore spinge verso l'uscita dalla saturazione
-        if abs(tau_cmd) < TORQUE_LIMIT or err * tau_cmd < 0:
-            integral_error += err * SIM_DT
+        # anti wind-up: integro solo se non saturo, o se l'errore porta fuori dalla saturazione
+        integrate = (np.abs(tau_cmd) < TORQUE_LIMIT) | (err * tau_cmd < 0)
+        integral_error += np.where(integrate, err * SIM_DT, 0.0)
 
-        # ------------------------------------------------------------------
-        # 2. ATTRITO: modello LuGre valutato sulla velocita' corrente
-        # ------------------------------------------------------------------
+        data.ctrl[actuator_ids] = np.clip(tau_cmd, -TORQUE_LIMIT, TORQUE_LIMIT)
+
+        # 2. COPPIA DI CARICO (qacc dello step precedente), filtrata
+        mujoco.mj_mulM(model, data, tau_inertia, data.qacc)
+        tau_load = tau_inertia[qvel_adr] + data.qfrc_bias[qvel_adr]
+        tau_load_filt += LOAD_FILTER_ALPHA * (np.abs(tau_load) - tau_load_filt)
+        load_ratio = np.minimum(tau_load_filt / TAU_REF, LOAD_MAX)
+
+        # 3. ATTRITO LuGre con parametri adattati al carico
+        Fc = FC0 * (1.0 + K_LOAD_C * load_ratio)
+        Fs = np.maximum(FS0 * (1.0 + K_LOAD_S * load_ratio), 1.05 * Fc)
+        sigma0 = SIGMA_0_0 * (1.0 + K_LOAD_SIGMA0 * load_ratio)
+        sigma1 = SIGMA_1_0 * np.sqrt(sigma0 / SIGMA_0_0)
+
         qdot = v_meas
+        g = Fc + (Fs - Fc) * np.exp(-(qdot / VS) ** 2)
+        r = np.abs(qdot) * sigma0 / g
 
-        g_qdot = FC + (FS - FC) * np.exp(-(qdot / VS) ** 2)
-        g_qdot_norm = g_qdot / SIGMA_0
-        r = np.abs(qdot) / g_qdot_norm
-
-        z_new = (z + SIM_DT * qdot) / (1 + SIM_DT * r)
+        z_new = (z + SIM_DT * qdot) / (1.0 + SIM_DT * r)
         zdot = qdot - r * z_new
-
-        tau_viscoso = FV * qdot
-        signal = SIGMA_0 * z_new + SIGMA_1 * zdot + tau_viscoso
-
-        noise = np.random.normal(loc=0.0, scale=0.02 * np.abs(signal))
-        tau_friction = signal + noise
-
+        signal = sigma0 * z_new + sigma1 * zdot + FV0 * qdot
+        tau_friction = signal + rng.normal(0.0, 0.02 * np.abs(signal))
         z = z_new
 
-        data.ctrl[target_actuator_id] = np.clip(tau_cmd, -TORQUE_LIMIT, TORQUE_LIMIT)
-        data.qfrc_applied[target_qvel_adr] = -tau_friction   # l'attrito si oppone al moto
+        data.qfrc_applied[qvel_adr] = -tau_friction   # l'attrito si oppone al moto
 
-
+        # 4. DINAMICA E LOG (qacc aggiornato, coerente con lo step corrente)
         mujoco.mj_forward(model, data)
+        mujoco.mj_mulM(model, data, tau_inertia, data.qacc)
 
-        pos_k      = data.qpos[target_qpos_adr]
-        vel_k      = data.qvel[target_qvel_adr]
-        tau_act_k  = data.qfrc_actuator[target_qvel_adr]
-        tau_bias_k = data.qfrc_bias[target_qvel_adr]
-        tau_con_k  = data.qfrc_constraint[target_qvel_adr]
+        tau_est = (tau_inertia[qvel_adr] + data.qfrc_bias[qvel_adr]
+                   - data.qfrc_constraint[qvel_adr] - data.qfrc_actuator[qvel_adr])
 
-        mujoco.mj_mulM(model, data, tau_inertia, data.qacc)   # M(q) * qacc
-        tau_in_k = tau_inertia[target_qvel_adr]               # indice di DoF, non joint id
+        log[step] = np.concatenate([
+            [data.time],
+            data.qpos[qpos_adr],
+            v_meas,
+            tau_load_filt,
+            tau_est,
+            tau_friction,                       # ground truth (segno opposto a tau_est)
+            data.qfrc_constraint[qvel_adr],
+        ])
 
-        log_rows.append({
-            "traj_id": i,
-            "t": data.time,
-            "position_rad": pos_k,
-            "velocity_rad_s": vel_k,
-            "torque_actuator_Nm": tau_act_k,
-            "torque_bias_Nm": tau_bias_k,
-            "inertia": tau_in_k,
-            "constraint": tau_con_k,
-            "torque_friction_true_Nm": tau_friction,   # ground truth, utile per validare
-        })
+        mujoco.mj_step(model, data)
 
+    # --- accettazione della traiettoria ---
+    df = pd.DataFrame(log, columns=cols)
+    has_constraints = df[constraint_cols].abs().to_numpy().max() > CONSTRAINT_TOL
+    is_finite = np.isfinite(log).all()
 
-        mujoco.mj_step(model, data)       
+    if has_constraints or not is_finite:
+        discarded += 1
+        motivo = "vincoli attivi" if has_constraints else "valori non finiti (instabilita')"
+        print(f"[tentativo {attempts}] scartata: {motivo}")
+        continue
 
-    df = pd.DataFrame(log_rows)
+    df.insert(0, "traj_id", accepted)
+    df.to_csv(OUTPUT_CSV, mode="w" if accepted == 0 else "a", header=(accepted == 0), index=False)
+    accepted += 1
+    print(f"[tentativo {attempts}] ok ({accepted}/{NUM_TRAJ})")
 
-    df["torque_friction_estimated_Nm"] = df["inertia"] + df["torque_bias_Nm"] - df["torque_actuator_Nm"] - df["constraint"]
-    df["traj_id"] = i
-    if (df["constraint"] == 0).all():  
-        lista_df.append(df)
-        print("true")
-    else:
-        print("false")
+if accepted == 0:
+    raise RuntimeError("Tutte le traiettorie sono state scartate")
+if accepted < NUM_TRAJ:
+    print(f"ATTENZIONE: accettate solo {accepted}/{NUM_TRAJ} traiettorie in {attempts} tentativi")
 
-df_total = pd.concat(lista_df, ignore_index=True)
-df_total.to_csv(OUTPUT_CSV, index=False)
-print(f"Dataset salvato in {OUTPUT_CSV} ({len(df_total)} campioni)")
-
-
+print(f"Dataset salvato in {OUTPUT_CSV}: {accepted} traiettorie, "
+      f"{accepted * n_steps} campioni ({discarded} scartate su {attempts} tentativi)")

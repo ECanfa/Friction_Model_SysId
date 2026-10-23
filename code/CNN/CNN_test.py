@@ -7,23 +7,24 @@ import matplotlib.pyplot as plt
 # ----------------------------------------------------------------------
 # CONFIGURAZIONE
 # ----------------------------------------------------------------------
-CHECKPOINT = "tcn_checkpoint.pth"
-INPUT_CSV = "../Datasets/testC.csv"
+giunto = 6
+CHECKPOINT = f"tcn_checkpoint_{giunto}.pth"
+INPUT_CSV = "../Datasets/testB.csv"
 DATASET_NAME = "Test C"
-LOW_VEL_THRESHOLD = 0.1     # rad/s, zona di Stribeck: RMSE riportata anche separatamente
-MAX_PLOTS = 15              # numero massimo di traiettorie mostrate nel grafico
+LOW_VEL_THRESHOLD = 0.1     
+MAX_PLOTS = 15             
 PLOT_COLS = 3
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 # ----------------------------------------------------------------------
-# MODELLO (identico a quello dello script di training)
+# MODELLO 
 # ----------------------------------------------------------------------
 class TCN(nn.Module):
-    def __init__(self, channels, kernel_size, dilations):
+    def __init__(self, in_channels, channels, kernel_size, dilations):
         super().__init__()
-        layers, c = [], 1
+        layers, c = [], in_channels
         for d in dilations:
             layers += [nn.Conv1d(c, channels, kernel_size, dilation=d), nn.ReLU()]
             c = channels
@@ -31,29 +32,39 @@ class TCN(nn.Module):
         self.final = nn.Conv1d(channels, 1, kernel_size=1)
         self.receptive_field = 1 + sum(d * (kernel_size - 1) for d in dilations)
 
-    def forward(self, x):                 # x: [B, 1, L + RF - 1] -> [B, 1, L]
+    def forward(self, x):                 # x: [B, C, L + RF - 1] -> [B, 1, L]
         return self.final(self.body(x))
 
 
-ckpt = torch.load(CHECKPOINT, map_location=device)
-model = TCN(ckpt["channels"], ckpt["kernel_size"], tuple(ckpt["dilations"])).to(device)
+ckpt = torch.load(CHECKPOINT, map_location=device, weights_only=True)
+model = TCN(ckpt["in_channels"], ckpt["channels"], ckpt["kernel_size"],
+            tuple(ckpt["dilations"])).to(device)
 model.load_state_dict(ckpt["model_state_dict"])
 model.eval()
 
 RF = model.receptive_field
 PAD = RF - 1
-x_scale = ckpt["x_scale"]      
+input_cols = ckpt["input_cols"]                                       # ordine dei canali del training
+x_mean = np.asarray(ckpt["x_mean"], np.float32).reshape(-1, 1)        # [C, 1]
+x_std = np.asarray(ckpt["x_std"], np.float32).reshape(-1, 1)          # [C, 1]
 y_scale = ckpt["y_scale"]
+
+VEL_IDX = input_cols.index(f"velocity_rad_{giunto}_s")                          # canale della velocita'
+
 print(f"Checkpoint: {CHECKPOINT} | campo recettivo: {RF} campioni | "
       f"val RMSE (training): {ckpt['best_val_rmse_Nm']:.3f} Nm")
+print(f"Canali di ingresso: {input_cols}")
 
 
 @torch.no_grad()
 def predict(x):
-    """Stessa procedura del training: RF-1 zeri in testa (la traiettoria parte da ferma),
-    ingresso normalizzato, uscita riportata in Nm."""
-    xp = np.concatenate([np.zeros(PAD, np.float32), x.astype(np.float32) / x_scale])
-    xt = torch.from_numpy(xp).view(1, 1, -1).to(device)
+    """Stessa procedura del training: normalizzazione per canale, PAD campioni in testa
+    ottenuti replicando il primo campione normalizzato, uscita riportata in Nm.
+    x: [C, T] grezzo -> [T]"""
+    xn = ((x - x_mean) / x_std).astype(np.float32)
+    pad = np.repeat(xn[:, :1], PAD, axis=1)
+    xp = np.concatenate([pad, xn], axis=1)                            # [C, PAD + T]
+    xt = torch.from_numpy(xp).unsqueeze(0).to(device)                 # [1, C, PAD + T]
     return model(xt).view(-1).cpu().numpy() * y_scale
 
 
@@ -62,15 +73,15 @@ def rmse(a, b):
 
 
 # ----------------------------------------------------------------------
-# DATI DI TEST (liste: le traiettorie possono avere lunghezze diverse)
+# DATI DI TEST 
 # ----------------------------------------------------------------------
 data = pandas.read_csv(INPUT_CSV)
 
 t_list, x_list, y_list = [], [], []
 for traj_id, g in data.groupby("traj_id", sort=True):
     t_list.append(g["t"].to_numpy())
-    x_list.append(g["velocity_rad_s"].to_numpy(np.float32))
-    y_list.append(g["torque_friction_estimated_Nm"].to_numpy(np.float32))
+    x_list.append(g[input_cols].to_numpy(np.float32).T)               # [C, T]
+    y_list.append(g[f"tau_friction_estimated_{giunto}"].to_numpy(np.float32))
 
 num_traj = len(y_list)
 print(f"{DATASET_NAME}: {num_traj} traiettorie")
@@ -84,19 +95,26 @@ for x, y in zip(x_list, y_list):
     preds.append(y_hat)
     rmse_all.append(rmse(y_hat, y))
 
-    mask = np.abs(x) < LOW_VEL_THRESHOLD     # sulla velocita' misurata, non su quella di riferimento
+    mask = np.abs(x[VEL_IDX]) < LOW_VEL_THRESHOLD  
     rmse_low.append(rmse(y_hat[mask], y[mask]) if mask.any() else np.nan)
 
 rmse_all = np.array(rmse_all)
 rmse_low = np.array(rmse_low)
+
+y_all = np.concatenate(y_list)
+p_all = np.concatenate(preds)
+rmse_global = rmse(p_all, y_all)
+baseline = float(y_all.std())                                  # media per confronto con errore della rete
+noise_floor = 0.02 * float(np.sqrt(np.mean(y_all ** 2)))       # stima del rumore non imparabile dalla rete
 
 # ----------------------------------------------------------------------
 # GRAFICI
 # ----------------------------------------------------------------------
 n_plot = min(num_traj, MAX_PLOTS)
 rows = int(np.ceil(n_plot / PLOT_COLS))
-fig, axes = plt.subplots(5, 3, figsize=(15, 12), sharex=True, sharey=True)
-axes = np.atleast_1d(axes).flatten()
+fig, axes = plt.subplots(rows, PLOT_COLS, figsize=(15, 2.4 * rows + 1),
+                         sharex=True, sharey=True, squeeze=False)
+axes = axes.flatten()
 
 for i in range(n_plot):
     ax = axes[i]
@@ -118,5 +136,10 @@ plt.show()
 # ----------------------------------------------------------------------
 # RIEPILOGO
 # ----------------------------------------------------------------------
-print(f"RMSE medio: {rmse_all.mean():.2f}Nm ± {rmse_all.std():.2f}Nm")
-print(f"RMSE min: {rmse_all.min():.2f}Nm  |  RMSE max: {rmse_all.max():.2f}Nm")
+print(f"RMSE medio: {rmse_all.mean():.3f} Nm ± {rmse_all.std():.3f} Nm")
+print(f"RMSE min: {rmse_all.min():.3f} Nm  |  RMSE max: {rmse_all.max():.3f} Nm")
+print(f"RMSE globale: {rmse_global:.3f} Nm")
+if not np.all(np.isnan(rmse_low)):
+    print(f"RMSE a bassa velocita' (|v| < {LOW_VEL_THRESHOLD} rad/s): "
+          f"{np.nanmean(rmse_low):.3f} Nm ± {np.nanstd(rmse_low):.3f} Nm")
+print(f"Baseline (std del target): {baseline:.3f} Nm  |  soglia di rumore ~{noise_floor:.3f} Nm")

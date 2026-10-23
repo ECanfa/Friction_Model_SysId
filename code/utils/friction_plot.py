@@ -4,36 +4,39 @@ import numpy as np
 
 SIM_DT = 0.001
 RAMP_DURATION = 0.3
-INPUT_CSV = "output.csv"
-NUM_VELOCITIES = 10
+INPUT_CSV = "../Datasets/testC.csv"
+NUM_VELOCITIES = 18
+num_traj = 40
 
-if INPUT_CSV == "output.csv":
-    DURATION_PER_STEP = 0.5
-else:
-    DURATION_PER_STEP = 0.6
 
-points_per_traj = int(DURATION_PER_STEP*NUM_VELOCITIES/SIM_DT)
 data = pandas.read_csv(INPUT_CSV, sep = ',')
 
-print(points_per_traj)
 
-friction_estimated = data["torque_friction_estimated_Nm"]
-velocities = data["velocity_rad_s"]
-velocities = velocities[:points_per_traj]
+frictions = np.array([data[f"tau_friction_estimated_{i}"] for i in range(7)])
+
+
+velocities = np.array([data[f"velocity_rad_{i}_s"] for i in range(7)])
 time = data["t"]
-velocities_sorted = np.argsort(velocities)
 
 
-t_traj_1 = time[61*points_per_traj:62*points_per_traj] %5 
-friction_traj_1 = friction_estimated[61*points_per_traj:62*points_per_traj] 
+n_rows = 20
+fig, axes = plt.subplots(4, 2, figsize=(15, 2.2 * n_rows + 1),
+                         sharex=True, sharey=True, squeeze=False)
+axes = axes.flatten()
+points_per_traj = int(len(frictions[0])/18)
+for i in range(7):
+    ax = axes[i]
+    t = time[points_per_traj:2*points_per_traj]
+    ax.plot(t, frictions[i,points_per_traj:2*points_per_traj], label="Attrito", color="#1a1a1a", linewidth=1.5, alpha=0.7)
+    ax.grid(True, linestyle=":", alpha=0.5)
+    if i == 0:
+        ax.legend(loc="upper right", fontsize=8, frameon=True, facecolor="white")
 
+for ax in axes[num_traj:]:          # nasconde i riquadri inutilizzati
+    ax.set_visible(False)
 
-plt.plot(t_traj_1, friction_traj_1, color='black', label='Attrito stimato')
-plt.title('Attrito')
-plt.xlabel('tempo [s]')
-plt.ylabel('Attrito [Nm]')
-plt.legend()
-plt.show()
+fig.supxlabel("Velocità [Rad/s]", fontsize=12, fontweight="bold")
+fig.supylabel("Coppia di attrito [Nm]", fontsize=12, fontweight="bold")
 
-plt.scatter(data["velocity_rad_s"], data["torque_friction_estimated_Nm"], s=1)
+plt.tight_layout()
 plt.show()

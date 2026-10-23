@@ -3,96 +3,108 @@ import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
 import pandas
-from sklearn.metrics import root_mean_squared_error
 
+# ----------------------------------------------------------------------
+# CONFIGURAZIONE
+# ----------------------------------------------------------------------
 SIM_DT = 0.001
-DURATION_PER_STEP = 0.7
-DATASET_NAME = "Test C"
 INPUT_CSV = "../Datasets/testC.csv"
-NUM_VELOCITIES = 10
+DATASET_NAME = "Test B"          # coerente con INPUT_CSV
+CHECKPOINT = "lstm_checkpoint.pth"
+N_COLS = 3
 
-data = pandas.read_csv(INPUT_CSV, sep = ',')
-
-friction = data["torque_friction_estimated_Nm"]
-velocities = data["velocity_rad_s"]
-
-x_test_data = []
-y_test_data = []
-
-for traj_id,traj_df in data.groupby("traj_id", sort=True):
-    x_test_data.append(traj_df["velocity_rad_s"].to_numpy())
-    y_test_data.append(traj_df["torque_friction_estimated_Nm"].to_numpy())
-
-num_traj = len(y_test_data)
-print(num_traj)
-
-# in array numpy per efficienza 
-x_test_data = np.array(x_test_data)
-y_test_data = np.array(y_test_data)
-
+# ----------------------------------------------------------------------
+# MODELLO (stessa architettura del training)
+# ----------------------------------------------------------------------
 class LSTM(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim):
-        super(LSTM, self).__init__()
-
+        super().__init__()
         self.lstm = nn.LSTM(input_size=input_dim, hidden_size=hidden_dim, batch_first=True)
         self.linear = nn.Linear(hidden_dim, output_dim)
 
-    def forward(self, x, hidden=None):
+    def forward(self, x, hidden=None):      # x: [B, T, C] -> [B, T, 1]
         lstm_out, hidden = self.lstm(x, hidden)
-        predictions = self.linear(lstm_out)
-        return predictions, hidden
-    
-checkpoint = torch.load('lstm_checkpoint.pth', weights_only=False)
-model = LSTM(checkpoint['input_dim'], checkpoint['hidden_dim'], checkpoint['output_dim'])
-model.load_state_dict(checkpoint['model_state_dict'])
+        return self.linear(lstm_out), hidden
+
+
+checkpoint = torch.load(CHECKPOINT, weights_only=True)
+model = LSTM(checkpoint["input_dim"], checkpoint["hidden_dim"], checkpoint["output_dim"])
+model.load_state_dict(checkpoint["model_state_dict"])
 model.eval()
 
+input_cols = checkpoint["input_cols"]                                   # ordine dei canali del training
+u_mean = np.asarray(checkpoint["u_mean"], np.float32).reshape(-1, 1)    # [C, 1]
+u_std = np.asarray(checkpoint["u_std"], np.float32).reshape(-1, 1)      # [C, 1]
+y_std = checkpoint["y_std"]
+print(f"Canali di ingresso: {input_cols}")
 
-u_std = checkpoint['u_std']
-y_std = checkpoint['y_std']
+# ----------------------------------------------------------------------
+# DATI
+# ----------------------------------------------------------------------
+data = pandas.read_csv(INPUT_CSV)
 
+x_test, y_test = [], []
+for _, g in data.groupby("traj_id", sort=True):
+    x_test.append(g[input_cols].to_numpy(np.float32).T)                 # [C, T]
+    y_test.append(g["torque_friction_estimated_Nm"].to_numpy(np.float32))
+
+num_traj = len(y_test)
+print(f"Traiettorie di test: {num_traj}")
+
+# ----------------------------------------------------------------------
+# PREDIZIONE (una traiettoria alla volta: nessun vincolo sulla lunghezza)
+# ----------------------------------------------------------------------
+y_pred = []
 with torch.no_grad():
-        
-    X_test_tensor = torch.tensor(x_test_data, dtype=torch.float32).unsqueeze(-1)
-    y_test_tensor = torch.tensor(y_test_data, dtype=torch.float32).unsqueeze(-1)
-    X_test_n = (X_test_tensor ) / u_std          # normalizzazione input come per training
+    for x in x_test:
+        xn = ((x) / u_std).astype(np.float32)                  # normalizzazione come nel training
+        xt = torch.from_numpy(np.ascontiguousarray(xn.T)).unsqueeze(0)  # [1, T, C]
+        out, _ = model(xt)
+        y_pred.append(out.view(-1).numpy() * y_std)                     # denormalizzazione
 
+# ----------------------------------------------------------------------
+# METRICHE
+# ----------------------------------------------------------------------
+def rmse(a, b):
+    return float(np.sqrt(np.mean((a - b) ** 2)))
 
-    y_test_pred_n, _ = model(X_test_n)
-    y_test_pred = y_test_pred_n * y_std           # denormalizzazione output per fit
-    y_test_pred = y_test_pred.squeeze(-1).numpy()
+rmse_scores = [rmse(y, p) for y, p in zip(y_test, y_pred)]
 
+y_all = np.concatenate(y_test)
+p_all = np.concatenate(y_pred)
+rmse_global = rmse(y_all, p_all)
+baseline = float(y_all.std())                       # "predico la media"
+noise_floor = 0.02 * float(np.sqrt(np.mean(y_all ** 2)))   # stima del rumore irriducibile (2%)
 
+print(f"RMSE medio per traiettoria: {np.mean(rmse_scores):.3f} Nm ± {np.std(rmse_scores):.3f} Nm")
+print(f"RMSE min: {np.min(rmse_scores):.3f} Nm  |  RMSE max: {np.max(rmse_scores):.3f} Nm")
+print(f"RMSE globale: {rmse_global:.3f} Nm")
+print(f"Baseline (std del target): {baseline:.3f} Nm  |  soglia di rumore ~{noise_floor:.3f} Nm")
 
-    fig, axes = plt.subplots(6, 3, figsize=(15, 12), sharex=True, sharey=True)
+# ----------------------------------------------------------------------
+# GRAFICI
+# ----------------------------------------------------------------------
+n_rows = int(np.ceil(num_traj / N_COLS))
+fig, axes = plt.subplots(n_rows, N_COLS, figsize=(15, 2.2 * n_rows + 1),
+                         sharex=True, sharey=True, squeeze=False)
+axes = axes.flatten()
 
-    axes = axes.flatten()
+for i in range(num_traj):
+    ax = axes[i]
+    t = np.arange(len(y_test[i])) * SIM_DT
+    ax.plot(t, y_test[i], label="Reale", color="#1a1a1a", linewidth=1.5, alpha=0.7)
+    ax.plot(t, y_pred[i], label="LSTM", color="#e63946", linestyle="--", linewidth=1.5)
+    ax.set_title(f"Traiettoria {i+1} (RMSE: {rmse_scores[i]:.2f} Nm)", fontsize=10, fontweight="bold")
+    ax.grid(True, linestyle=":", alpha=0.5)
+    if i == 0:
+        ax.legend(loc="upper right", fontsize=8, frameon=True, facecolor="white")
 
-    RMSE_scores = []
-    for i in range(num_traj):
-        y_target = y_test_data[i, :]
-        y_estimated = y_test_pred[i, :]
-        rme = root_mean_squared_error(y_target, y_estimated)
-        RMSE_scores.append(rme)
-        
-        ax = axes[i]
-        
-        ax.plot(y_target, label="Reale", color="#1a1a1a", linewidth=1.5, alpha=0.7)
-        ax.plot(y_estimated, label="ResNet", color="#e63946", linestyle="--", linewidth=1.5)
-        
-        ax.set_title(f"Traiettoria {i+1} (RMSE: {rme:.1f}Nm)", fontsize=10, fontweight='bold')
-        ax.grid(True, linestyle=":", alpha=0.5)
-        
-        if i == 0:
-            ax.legend(loc="upper right", fontsize=8, frameon=True, facecolor="white")
+for ax in axes[num_traj:]:          # nasconde i riquadri inutilizzati
+    ax.set_visible(False)
 
+fig.supxlabel("Tempo [s]", fontsize=12, fontweight="bold")
+fig.supylabel("Coppia di attrito [Nm]", fontsize=12, fontweight="bold")
+fig.suptitle(f"{DATASET_NAME}: coppia di attrito stimata vs predetta", fontsize=14, fontweight="bold")
 
-    fig.supxlabel("Campioni Temporali ($k$)", fontsize=12, fontweight='bold')
-    fig.supylabel("Uscita del Sistema", fontsize=12, fontweight='bold')
-    fig.suptitle(f"{DATASET_NAME}: coppia di attrito stimata vs predetta", fontsize=14, fontweight="bold")
-
-    plt.tight_layout()
-    plt.show()
-
-print(f"RMSE medio: {np.mean(RMSE_scores):.2f}Nm ± {np.std(RMSE_scores):.2f}Nm")
-print(f"RMSE min: {np.min(RMSE_scores):.2f}Nm  |  RMSE max: {np.max(RMSE_scores):.2f}Nm")
+plt.tight_layout()
+plt.show()
