@@ -18,8 +18,8 @@ from sklearn.metrics import root_mean_squared_error
 import math
 import pandas
 
-na = 2
-nb = 1
+na = 5
+nb = 5
 
 SIM_DT = 0.001
 DURATION_PER_STEP = 0.4
@@ -35,14 +35,14 @@ dataB = pandas.read_csv(INPUT_B_CSV, sep=',')
 x_train_data_A = []
 y_train_data_A = []
 for traj_id, traj_df in dataA.groupby("traj_id", sort=True):
-    x_train_data_A.append(traj_df["velocity_rad_s"].to_numpy(dtype=np.float32))
-    y_train_data_A.append(traj_df["torque_friction_estimated_Nm"].to_numpy(dtype=np.float32))
+    x_train_data_A.append(traj_df["velocity_rad_1_s"].to_numpy(dtype=np.float32))
+    y_train_data_A.append(traj_df["tau_friction_estimated_1"].to_numpy(dtype=np.float32))
 
 x_train_data_B = []
 y_train_data_B = []
 for traj_id, traj_df in dataB.groupby("traj_id", sort=True):
-    x_train_data_B.append(traj_df["velocity_rad_s"].to_numpy(dtype=np.float32))
-    y_train_data_B.append(traj_df["torque_friction_estimated_Nm"].to_numpy(dtype=np.float32))
+    x_train_data_B.append(traj_df["velocity_rad_1_s"].to_numpy(dtype=np.float32))
+    y_train_data_B.append(traj_df["tau_friction_estimated_1"].to_numpy(dtype=np.float32))
 
 num_traj_A = len(y_train_data_A)
 num_traj_B = len(y_train_data_B)
@@ -52,7 +52,7 @@ x_train_list = x_train_data_A + x_train_data_B
 y_train_list = y_train_data_A + y_train_data_B
 
 max_lag = max(na, nb)  
-basis_function = Polynomial(degree=3)
+basis_function = Polynomial(degree=5)
 
 phi = []
 y_targets = []
@@ -116,15 +116,15 @@ def NARX(theta, reg_code, x, y, k):
 
 data = pandas.read_csv(TEST_CSV, sep = ',')
 
-friction = data["torque_friction_estimated_Nm"]
-velocities = data["velocity_rad_s"]
+friction = data["tau_friction_estimated_1"]
+velocities = data["velocity_rad_1_s"]
 
 x_test_data = []
 y_test_data = []
 
 for traj_id,traj_df in data.groupby("traj_id", sort=True):
-    x_test_data.append(traj_df["velocity_rad_s"].to_numpy())
-    y_test_data.append(traj_df["torque_friction_estimated_Nm"].to_numpy())
+    x_test_data.append(traj_df["velocity_rad_1_s"].to_numpy())
+    y_test_data.append(traj_df["tau_friction_estimated_1"].to_numpy())
 
 num_traj = len(y_test_data)
 print(num_traj)

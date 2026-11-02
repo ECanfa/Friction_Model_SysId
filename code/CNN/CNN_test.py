@@ -7,9 +7,9 @@ import matplotlib.pyplot as plt
 # ----------------------------------------------------------------------
 # CONFIGURAZIONE
 # ----------------------------------------------------------------------
-giunto = 6
+giunto = 4
 CHECKPOINT = f"tcn_checkpoint_{giunto}.pth"
-INPUT_CSV = "../Datasets/testB.csv"
+INPUT_CSV = "../Datasets/testA.csv"
 DATASET_NAME = "Test C"
 LOW_VEL_THRESHOLD = 0.1     
 MAX_PLOTS = 15             
@@ -129,7 +129,7 @@ for ax in axes[n_plot:]:
 
 fig.supxlabel("Tempo [s]", fontsize=12, fontweight="bold")
 fig.supylabel("Coppia di attrito [Nm]", fontsize=12, fontweight="bold")
-fig.suptitle(f"{DATASET_NAME}: coppia di attrito stimata vs predetta", fontsize=14, fontweight="bold")
+fig.suptitle(f"{DATASET_NAME}: coppia di attrito stimata vs predetta per il giunto {giunto+1}", fontsize=12, fontweight="bold")
 plt.tight_layout()
 plt.show()
 

@@ -7,10 +7,11 @@ import pandas
 # ----------------------------------------------------------------------
 # CONFIGURAZIONE
 # ----------------------------------------------------------------------
+giunto = 6
 SIM_DT = 0.001
 INPUT_CSV = "../Datasets/testC.csv"
 DATASET_NAME = "Test B"          # coerente con INPUT_CSV
-CHECKPOINT = "lstm_checkpoint.pth"
+CHECKPOINT = f"lstm_checkpoint_{giunto}.pth"
 N_COLS = 3
 
 # ----------------------------------------------------------------------
@@ -46,7 +47,7 @@ data = pandas.read_csv(INPUT_CSV)
 x_test, y_test = [], []
 for _, g in data.groupby("traj_id", sort=True):
     x_test.append(g[input_cols].to_numpy(np.float32).T)                 # [C, T]
-    y_test.append(g["torque_friction_estimated_Nm"].to_numpy(np.float32))
+    y_test.append(g[f"tau_friction_estimated_{giunto}"].to_numpy(np.float32))
 
 num_traj = len(y_test)
 print(f"Traiettorie di test: {num_traj}")
@@ -104,7 +105,7 @@ for ax in axes[num_traj:]:          # nasconde i riquadri inutilizzati
 
 fig.supxlabel("Tempo [s]", fontsize=12, fontweight="bold")
 fig.supylabel("Coppia di attrito [Nm]", fontsize=12, fontweight="bold")
-fig.suptitle(f"{DATASET_NAME}: coppia di attrito stimata vs predetta", fontsize=14, fontweight="bold")
+fig.suptitle(f"{DATASET_NAME}: coppia di attrito stimata vs predetta per il giunto {giunto+1}", fontsize=12, fontweight="bold")
 
 plt.tight_layout()
 plt.show()

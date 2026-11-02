@@ -7,10 +7,11 @@ import torch.nn as nn
 # ----------------------------------------------------------------------
 # CONFIGURAZIONE
 # ----------------------------------------------------------------------
+giunto = 6
 SEED = 0
 INPUT_A_CSV = "../Datasets/trainingA.csv"
 INPUT_B_CSV = "../Datasets/trainingB.csv"
-INPUT_COLS = ["velocity_rad_s", "tau_load"]   # ordine dei canali
+INPUT_COLS = [f"velocity_rad_{giunto}_s", f"tau_load_{giunto}"]    # ordine dei canali
 
 INPUT_DIM = len(INPUT_COLS)
 HIDDEN_DIM = 16
@@ -51,7 +52,7 @@ def load(csv):
     xs, ys = [], []
     for _, g in df.groupby("traj_id", sort=True):
         xs.append(g[INPUT_COLS].to_numpy(np.float32).T)           # [C, T]
-        ys.append(g["torque_friction_estimated_Nm"].to_numpy(np.float32))
+        ys.append(g[f"tau_friction_estimated_{giunto}"].to_numpy(np.float32))
     return xs, ys
 
 # split delle traiettorie in training e validazione
@@ -157,6 +158,6 @@ torch.save({
     "y_std": y_std,
     "best_val_rmse_Nm": best,
     "seed": SEED,
-}, "lstm_checkpoint.pth")
+}, f"lstm_checkpoint_{giunto}.pth")
 
-print("Modello salvato in: lstm_checkpoint.pth")
+print(f"Modello salvato in: lstm_checkpoint_{giunto}.pth")
