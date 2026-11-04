@@ -7,10 +7,10 @@ import pandas
 # ----------------------------------------------------------------------
 # CONFIGURAZIONE
 # ----------------------------------------------------------------------
-giunto = 6
+giunto = 2
 SIM_DT = 0.001
 INPUT_CSV = "../Datasets/testC.csv"
-DATASET_NAME = "Test B"          # coerente con INPUT_CSV
+DATASET_NAME = "Test C"          # coerente con INPUT_CSV
 CHECKPOINT = f"lstm_checkpoint_{giunto}.pth"
 N_COLS = 3
 
@@ -53,7 +53,7 @@ num_traj = len(y_test)
 print(f"Traiettorie di test: {num_traj}")
 
 # ----------------------------------------------------------------------
-# PREDIZIONE (una traiettoria alla volta: nessun vincolo sulla lunghezza)
+# PREDIZIONE 
 # ----------------------------------------------------------------------
 y_pred = []
 with torch.no_grad():
@@ -79,18 +79,18 @@ noise_floor = 0.02 * float(np.sqrt(np.mean(y_all ** 2)))   # stima del rumore ir
 
 print(f"RMSE medio per traiettoria: {np.mean(rmse_scores):.3f} Nm ± {np.std(rmse_scores):.3f} Nm")
 print(f"RMSE min: {np.min(rmse_scores):.3f} Nm  |  RMSE max: {np.max(rmse_scores):.3f} Nm")
-print(f"RMSE globale: {rmse_global:.3f} Nm")
+print(f"NRMSE globale: {rmse_global:.3f} Nm")
 print(f"Baseline (std del target): {baseline:.3f} Nm  |  soglia di rumore ~{noise_floor:.3f} Nm")
 
 # ----------------------------------------------------------------------
 # GRAFICI
 # ----------------------------------------------------------------------
 n_rows = int(np.ceil(num_traj / N_COLS))
-fig, axes = plt.subplots(n_rows, N_COLS, figsize=(15, 2.2 * n_rows + 1),
+fig, axes = plt.subplots(2, 2, figsize=(15, 2.2 * n_rows + 1),
                          sharex=True, sharey=True, squeeze=False)
 axes = axes.flatten()
 
-for i in range(num_traj):
+for i in range(2):
     ax = axes[i]
     t = np.arange(len(y_test[i])) * SIM_DT
     ax.plot(t, y_test[i], label="Reale", color="#1a1a1a", linewidth=1.5, alpha=0.7)
@@ -100,12 +100,25 @@ for i in range(num_traj):
     if i == 0:
         ax.legend(loc="upper right", fontsize=8, frameon=True, facecolor="white")
 
-for ax in axes[num_traj:]:          # nasconde i riquadri inutilizzati
+for ax in axes[num_traj:]:          
+    ax.set_visible(False)
+
+for i in range(2):
+    ax = axes[i+2]
+    t = np.arange(len(y_test[i])) * SIM_DT
+    ax.plot(t, y_test[num_traj-i-1], label="Reale", color="#1a1a1a", linewidth=1.5, alpha=0.7)
+    ax.plot(t, y_pred[num_traj-i-1], label="LSTM", color="#e63946", linestyle="--", linewidth=1.5)
+    ax.set_title(f"Traiettoria {i+3} (RMSE: {rmse_scores[i]:.2f} Nm)", fontsize=10, fontweight="bold")
+    ax.grid(True, linestyle=":", alpha=0.5)
+    if i == 0:
+        ax.legend(loc="upper right", fontsize=8, frameon=True, facecolor="white")
+
+for ax in axes[num_traj:]:          
     ax.set_visible(False)
 
 fig.supxlabel("Tempo [s]", fontsize=12, fontweight="bold")
 fig.supylabel("Coppia di attrito [Nm]", fontsize=12, fontweight="bold")
-fig.suptitle(f"{DATASET_NAME}: coppia di attrito stimata vs predetta per il giunto {giunto+1}", fontsize=12, fontweight="bold")
+fig.suptitle(f"{DATASET_NAME}: coppia di attrito effettiva vs coppia di attrito predetta per il giunto {giunto+1}", fontsize=12, fontweight="bold")
 
 plt.tight_layout()
 plt.show()

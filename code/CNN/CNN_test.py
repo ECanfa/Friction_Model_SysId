@@ -7,9 +7,9 @@ import matplotlib.pyplot as plt
 # ----------------------------------------------------------------------
 # CONFIGURAZIONE
 # ----------------------------------------------------------------------
-giunto = 4
+giunto = 6
 CHECKPOINT = f"tcn_checkpoint_{giunto}.pth"
-INPUT_CSV = "../Datasets/testA.csv"
+INPUT_CSV = "../Datasets/testC.csv"
 DATASET_NAME = "Test C"
 LOW_VEL_THRESHOLD = 0.1     
 MAX_PLOTS = 15             
@@ -58,9 +58,6 @@ print(f"Canali di ingresso: {input_cols}")
 
 @torch.no_grad()
 def predict(x):
-    """Stessa procedura del training: normalizzazione per canale, PAD campioni in testa
-    ottenuti replicando il primo campione normalizzato, uscita riportata in Nm.
-    x: [C, T] grezzo -> [T]"""
     xn = ((x - x_mean) / x_std).astype(np.float32)
     pad = np.repeat(xn[:, :1], PAD, axis=1)
     xp = np.concatenate([pad, xn], axis=1)                            # [C, PAD + T]
@@ -112,11 +109,11 @@ noise_floor = 0.02 * float(np.sqrt(np.mean(y_all ** 2)))       # stima del rumor
 # ----------------------------------------------------------------------
 n_plot = min(num_traj, MAX_PLOTS)
 rows = int(np.ceil(n_plot / PLOT_COLS))
-fig, axes = plt.subplots(rows, PLOT_COLS, figsize=(15, 2.4 * rows + 1),
+fig, axes = plt.subplots(2, 2, figsize=(15, 2.4 * rows + 1),
                          sharex=True, sharey=True, squeeze=False)
 axes = axes.flatten()
 
-for i in range(n_plot):
+for i in range(2):
     ax = axes[i]
     ax.plot(t_list[i], y_list[i], label="Reale", color="#1a1a1a", linewidth=1.5, alpha=0.7)
     ax.plot(t_list[i], preds[i], label="TCN", color="#e63946", linestyle="--", linewidth=1.5)
@@ -127,11 +124,22 @@ for i in range(n_plot):
 for ax in axes[n_plot:]:
     ax.axis("off")
 
+for i in range(2):
+    ax = axes[i+2]
+    ax.plot(t_list[num_traj-i-1], y_list[num_traj-i-1], label="Reale", color="#1a1a1a", linewidth=1.5, alpha=0.7)
+    ax.plot(t_list[num_traj-i-1], preds[num_traj-i-1], label="TCN", color="#e63946", linestyle="--", linewidth=1.5)
+    ax.set_title(f"Traiettoria {i + 3} (RMSE: {rmse_all[i]:.2f} Nm)", fontsize=10, fontweight="bold")
+    ax.grid(True, linestyle=":", alpha=0.5)
+    if i == 0:
+        ax.legend(loc="upper right", fontsize=8, frameon=True, facecolor="white")
+for ax in axes[n_plot:]:
+    ax.axis("off")
+
 fig.supxlabel("Tempo [s]", fontsize=12, fontweight="bold")
 fig.supylabel("Coppia di attrito [Nm]", fontsize=12, fontweight="bold")
-fig.suptitle(f"{DATASET_NAME}: coppia di attrito stimata vs predetta per il giunto {giunto+1}", fontsize=12, fontweight="bold")
-plt.tight_layout()
-plt.show()
+fig.suptitle(f"{DATASET_NAME}: coppia di attrito effettiva vs coppia di attrito predetta per il giunto {giunto+1}", fontsize=12, fontweight="bold")
+'''plt.tight_layout()
+plt.show()'''
 
 # ----------------------------------------------------------------------
 # RIEPILOGO

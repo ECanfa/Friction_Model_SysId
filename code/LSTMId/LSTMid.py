@@ -73,7 +73,6 @@ x_tr, y_tr = xtrA + xtrB, ytrA + ytrB
 x_va, y_va = xvaA + xvaB, yvaA + yvaB
 print(f"Train: {len(x_tr)} traiettorie, validazione: {len(x_va)}")
 
-# statistiche PER CANALE (calcolate solo sul training), forma [C, 1]
 x_cat = np.concatenate(x_tr, axis=1)
 u_mean = x_cat.mean(axis=1, keepdims=True).astype(np.float32)
 u_std = x_cat.std(axis=1, keepdims=True).astype(np.float32)

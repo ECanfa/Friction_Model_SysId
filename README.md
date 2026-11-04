@@ -45,4 +45,5 @@ Una volta generata la traiettoria, tornando al primo ambiente virtuale si può e
 # Analisi del comportamento
 Per verificare l'efficacia del lavoro svolto è possibile eseguire lo script control\_plot.py, nella cartella utils/,br che mostra la differenza tra la traiettoria desiderata (quella da inseguire) e quella effettivamente registrata dal sensore del giunto preso in esame, con e senza retroazione dell'attrito stimato.
 È inoltre presente un secondo plot che mostra l'errore calcolato punto per punto sulla traiettoria.
+Sarà necessario modificare i titoli dei .csv in base al comportamento che si vuole analizzare.
 
